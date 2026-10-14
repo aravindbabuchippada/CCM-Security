@@ -1,0 +1,46 @@
+<configuration>
+    <!-- path to the generated logs folder -->
+    <property name="LOG_PATH" value="${log.path:-./logs}" />
+
+    <appender name="ControllerAppender" class="ch.qos.logback.core.FileAppender">
+        <file>${LOG_PATH}/CCM-Security/ccm-security-controller.log</file>
+        <append>false</append>
+        <encoder>
+            <pattern>%d %-5level %logger - %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <appender name="ServiceAppender" class="ch.qos.logback.core.FileAppender">
+        <file>${LOG_PATH}/CCM-Security/ccm-security-service.log</file>
+        <append>false</append>
+        <encoder>
+            <pattern>%d %-5level %logger - %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <appender name="GlobalAppender" class="ch.qos.logback.core.FileAppender">
+        <file>${LOG_PATH}/CCM-Security/ccm-security-global.log</file>
+        <append>false</append>
+        <encoder>
+            <pattern>%d %-5level %logger - %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <!-- Package-specific loggers -->
+    <logger name="com.ccm.security.controller" level="DEBUG" additivity="false">
+        <appender-ref ref="ControllerAppender"/>
+    </logger>
+
+    <logger name="com.ccm.security.services" level="DEBUG" additivity="false">
+        <appender-ref ref="ServiceAppender"/>
+    </logger>
+
+    <logger name="com.ccm.security.logging" level="DEBUG" additivity="false">
+        <appender-ref ref="GlobalAppender"/>
+    </logger>
+
+    <!-- Root fallback logger -->
+    <root level="DEBUG">
+        <appender-ref ref="GlobalAppender"/>
+    </root>
+</configuration>

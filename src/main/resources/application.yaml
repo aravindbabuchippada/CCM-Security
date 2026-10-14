@@ -1,0 +1,26 @@
+spring:
+  profiles:
+    active: dev
+  jpa:
+    database-platform: org.hibernate.dialect.PostgreSQLDialect
+    hibernate:
+      ddl-auto: update
+    show-sql: true
+
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+  packages-to-scan: com.ccm.security.controller
+
+management:
+  endpoint:
+    health:
+      show-details: "always"
+    metrics:
+      enabled: true
+  endpoints:
+    web:
+      exposure:
+        include: health, info, prometheus, metrics
