@@ -19,6 +19,12 @@ public class CustomEurekaInstanceConfig extends MyDataCenterInstanceConfig {
     @Value("${server.servlet.context-path:/}")
     private String contextPath;
 
+    @Value("${eureka.instance.lease-renewal-interval-in-seconds}")
+    private int leaseRenewalInterval;
+
+    @Value("${eureka.instance.lease-expiration-duration-in-seconds}")
+    private int leaseExpirationDuration;
+
     @Override
     public String getAppname() {
         return appName;
@@ -67,5 +73,15 @@ public class CustomEurekaInstanceConfig extends MyDataCenterInstanceConfig {
     @Override
     public String getHealthCheckUrl() {
         return getHomePageUrl() + "/actuator/health";
+    }
+
+    @Override
+    public int getLeaseRenewalIntervalInSeconds() {
+        return leaseRenewalInterval;
+    }
+
+    @Override
+    public int getLeaseExpirationDurationInSeconds() {
+        return leaseExpirationDuration;
     }
 }

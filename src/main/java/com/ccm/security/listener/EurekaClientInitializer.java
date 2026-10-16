@@ -6,7 +6,6 @@ import com.netflix.appinfo.InstanceInfo;
 import com.netflix.discovery.DefaultEurekaClientConfig;
 import com.netflix.discovery.DiscoveryClient;
 import com.netflix.discovery.EurekaClient;
-import com.netflix.discovery.shared.Application;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -14,11 +13,11 @@ import org.springframework.context.SmartLifecycle;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 import org.springframework.stereotype.Component;
 
+import java.time.Duration;
 import java.util.Collections;
 import java.util.List;
-import java.util.concurrent.ScheduledFuture;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 /* EurekaClientInitializer -> Manages the Eureka client for a microservice, ensuring automatic registration
  *                             and re-registration with the Eureka server.
@@ -28,41 +27,33 @@ import java.util.concurrent.atomic.AtomicBoolean;
 @Component
 public class EurekaClientInitializer implements SmartLifecycle {
 
-    // Picked from the Active Spring Profile
+    private static final Logger logger = LoggerFactory.getLogger(EurekaClientInitializer.class);
+
     @Value("${EUREKA_URL}")
     private String eurekaUrl;
 
-    // Dynamic scheduler interval comes from Profiles YAML
-    @Value("${eureka.client.check-registration-interval-seconds}")
-    private int checkIntervalSeconds;
+    @Value("${eureka.client.registry-fetch-interval-seconds}")
+    private int fetchInterval;
 
-    // Core objects for communicating with Eureka server and managing Instance status
-    private EurekaClient eurekaClient;
-    private ApplicationInfoManager appInfoManager;
+    @Value("${eureka.client.initial-instance-info-replication-interval-seconds}")
+    private int replicationInterval;
 
-    // Tracks SmartLifecycle state
-    private boolean running = false;
+    @Value("${eureka.client.reregister-interval-seconds}")
+    private int reregisterInterval;
 
-    // Handles periodic registration checks.
-    private ThreadPoolTaskScheduler scheduler;
-    private ScheduledFuture<?> heartbeatChecker;
-
-    // Prevents overlapping re-registration attempts.
-    private final AtomicBoolean reRegistering = new AtomicBoolean(false);
-
-    // Used to Initialize Eureka client registration
     private final CustomEurekaInstanceConfig instanceConfig;
+    private ApplicationInfoManager appInfoManager;
+    private EurekaClient eurekaClient;
+    private volatile boolean running = false;
+    private ThreadPoolTaskScheduler scheduler;
 
     public EurekaClientInitializer(CustomEurekaInstanceConfig instanceConfig) {
         this.instanceConfig = instanceConfig;
     }
 
-    private static final Logger logger = LoggerFactory.getLogger(EurekaClientInitializer.class);
-
     @Override
     public void start() {
         try {
-            // Used to Initialize Eureka client registration
             appInfoManager = new ApplicationInfoManager(instanceConfig);
 
             DefaultEurekaClientConfig clientConfig = new DefaultEurekaClientConfig() {
@@ -70,52 +61,50 @@ public class EurekaClientInitializer implements SmartLifecycle {
                 public List<String> getEurekaServerServiceUrls(String myZone) {
                     return Collections.singletonList(eurekaUrl);
                 }
+
+                @Override
+                public int getRegistryFetchIntervalSeconds() {
+                    return fetchInterval;
+                }
+
+                @Override
+                public int getInitialInstanceInfoReplicationIntervalSeconds() {
+                    return replicationInterval;
+                }
             };
             eurekaClient = new DiscoveryClient(appInfoManager, clientConfig);
-
-            // Marks this microservice as UP in Eureka after initial registration.
             appInfoManager.setInstanceStatus(InstanceInfo.InstanceStatus.UP);
-            logger.info(
-                    "Eureka Client registered successfully. InstanceId={}",
-                    appInfoManager.getInfo().getInstanceId()
-            );
-
-            // Scheduler to ensure automatic re-registration if Eureka server restarts or heartbeats fail.
-            scheduler = new ThreadPoolTaskScheduler();
-            scheduler.setPoolSize(1);
-            scheduler.setThreadNamePrefix("eureka-heartbeat-");
-            scheduler.initialize();
-
             running = true;
 
-            heartbeatChecker = scheduler.scheduleAtFixedRate(
-                    this::checkAndRegister,
-                    TimeUnit.SECONDS.toMillis(checkIntervalSeconds)
-            );
+            scheduler = new ThreadPoolTaskScheduler();
+            scheduler.setPoolSize(1);
+            scheduler.setThreadNamePrefix("eureka-reregister-");
+            scheduler.initialize();
+            scheduler.scheduleWithFixedDelay(this::markDirty, Duration.ofSeconds(reregisterInterval));
+
+            logger.info("Eureka Client registered. InstanceId={}", appInfoManager.getInfo().getInstanceId());
         } catch (Exception e) {
-            logger.error("Error initializing Eureka Client: ", e);
+            logger.error("Error initializing Eureka Client", e);
         }
     }
 
-    // Gracefully stop the scheduler and Eureka client during Spring shutdown.
+    private void markDirty() {
+        try {
+            appInfoManager.registerAppMetadata(
+                    Map.of("lastRefresh", String.valueOf(System.currentTimeMillis())));
+        } catch (Exception e) {
+            logger.warn("Unable to trigger Eureka re-registration", e);
+        }
+    }
+
     @Override
     public void stop() {
         logger.info("Stopping Eureka Client...");
         running = false;
 
-        if (heartbeatChecker != null) {
-            heartbeatChecker.cancel(true);
-        }
         if (scheduler != null) {
             scheduler.shutdown();
-
-            try {
-                scheduler.getScheduledExecutor().awaitTermination(5, TimeUnit.SECONDS);
-            } catch (InterruptedException ex) {
-                Thread.currentThread().interrupt();
-            }
         }
-
         try {
             if (appInfoManager != null) {
                 appInfoManager.setInstanceStatus(InstanceInfo.InstanceStatus.DOWN);
@@ -126,84 +115,19 @@ public class EurekaClientInitializer implements SmartLifecycle {
         } catch (Exception ex) {
             logger.warn("Unable to mark instance DOWN", ex);
         }
-
         if (eurekaClient != null) {
-            eurekaClient.shutdown();
+            eurekaClient.shutdown();   // also deregisters
         }
-        logger.info("Eureka Client stopped successfully.");
+        logger.info("Eureka Client stopped.");
     }
 
-    // Required by SmartLifecycle to track whether the component is active.
-    @Override
-    public boolean isRunning() {
-        return running;
-    }
-
-    /**
-     * Periodically checks if this instance is registered.
-     * If not, forces re-registration.
-     */
-    private void checkAndRegister() {
-        // Avoid multiple overlapping re-registration attempts.
-        if (!reRegistering.compareAndSet(false, true)) {
-            return;
-        }
-
-        try {
-            // Checks if the microservice instance is still registered in Eureka.
-            Application app = eurekaClient.getApplication(appInfoManager.getInfo().getAppName());
-            boolean registered = app != null && app.getInstances() != null
-                    && app.getInstances().stream()
-                    .anyMatch(i -> i.getHostName().equals(appInfoManager.getInfo().getHostName()) && i.getPort() == appInfoManager.getInfo().getPort());
-
-            if (!registered) {
-                logger.warn("Eureka instance missing. Recreating DiscoveryClient for re-registration...");
-
-                /* If missing, shut down the old client.
-                 *  Re-create a new DiscoveryClient pointing to Eureka.
-                 *  Force status UP → ensures the microservice is immediately visible in Eureka.
-                 * */
-                if (eurekaClient != null) eurekaClient.shutdown();
-                DefaultEurekaClientConfig clientConfig = new DefaultEurekaClientConfig() {
-                    @Override
-                    public List<String> getEurekaServerServiceUrls(String myZone) {
-                        return Collections.singletonList(eurekaUrl);
-                    }
-                };
-                TimeUnit.SECONDS.sleep(2);
-                eurekaClient = new DiscoveryClient(appInfoManager, clientConfig);
-                appInfoManager.setInstanceStatus(InstanceInfo.InstanceStatus.UP);
-
-                logger.info("Re-registered with Eureka successfully.");
-            }
-        } catch (InterruptedException ex) {
-            Thread.currentThread().interrupt();
-        }
-        catch (Exception ex) {
-            logger.warn("Unable to communicate with Eureka Server. Registration will be retried.", ex);
-        } finally {
-            // Release the re-registration lock so the next scheduler cycle can run.
-            reRegistering.set(false);
-        }
-    }
-
-    @Override
-    public int getPhase() {
-        return Integer.MAX_VALUE;
-    }
-
-    @Override
-    public boolean isAutoStartup() {
-        return true;
-    }
+    @Override public boolean isRunning() { return running; }
+    @Override public int getPhase() { return Integer.MAX_VALUE; }
+    @Override public boolean isAutoStartup() { return true; }
 
     @Override
     public void stop(Runnable callback) {
         stop();
         callback.run();
-    }
-
-    public EurekaClient getEurekaClient() {
-        return eurekaClient;
     }
 }
